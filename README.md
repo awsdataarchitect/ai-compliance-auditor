@@ -70,8 +70,8 @@ The system uses a serverless architecture built on AWS with AI integration:
 
 1. **Clone and install dependencies:**
 ```bash
-git clone <repository-url>
-cd impetus
+git clone https://github.com/awsdataarchitect/ai-compliance-auditor
+cd ai-compliance-auditor
 npm install
 ```
 
