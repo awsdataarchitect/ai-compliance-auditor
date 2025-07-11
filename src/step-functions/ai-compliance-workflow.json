@@ -1,0 +1,367 @@
+{
+  "Comment": "AI Compliance Auditor Workflow - MVP Version",
+  "StartAt": "ValidateInput",
+  "States": {
+    "ValidateInput": {
+      "Type": "Pass",
+      "Comment": "Validate and prepare input data",
+      "Parameters": {
+        "review_id.$": "$.review_id",
+        "product_id.$": "$.product_id",
+        "user_id.$": "$.user_id",
+        "content.$": "$.content",
+        "rating.$": "$.rating",
+        "region.$": "$.region",
+        "product_category.$": "$.product_category",
+        "compliance_mode.$": "$.compliance_mode",
+        "timestamp.$": "$$.State.EnteredTime",
+        "execution_id.$": "$$.Execution.Name"
+      },
+      "Next": "ProcessReview"
+    },
+    
+    "ProcessReview": {
+      "Type": "Parallel",
+      "Comment": "Process review through analysis and policy validation",
+      "Branches": [
+        {
+          "StartAt": "ReviewAnalysis",
+          "States": {
+            "ReviewAnalysis": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "ai-compliance-review-auditor",
+                "Payload": {
+                  "review_id.$": "$.review_id",
+                  "content.$": "$.content",
+                  "product_id.$": "$.product_id",
+                  "user_id.$": "$.user_id",
+                  "region.$": "$.region",
+                  "product_category.$": "$.product_category"
+                }
+              },
+              "ResultPath": "$.analysis_result",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "AnalysisError",
+                  "ResultPath": "$.error"
+                }
+              ],
+              "End": true
+            },
+            
+            "AnalysisError": {
+              "Type": "Pass",
+              "Parameters": {
+                "error_type": "ANALYSIS_FAILED",
+                "error_message.$": "$.error.Cause",
+                "analysis_result": {
+                  "statusCode": 500,
+                  "analysis": {
+                    "toxicity_score": 10.0,
+                    "bias_score": 10.0,
+                    "hallucination_score": 10.0,
+                    "explanations": {
+                      "toxicity": "Analysis failed - defaulting to high risk",
+                      "bias": "Analysis failed - defaulting to high risk", 
+                      "hallucination": "Analysis failed - defaulting to high risk"
+                    }
+                  }
+                }
+              },
+              "ResultPath": "$.analysis_result",
+              "End": true
+            }
+          }
+        }
+      ],
+      "Next": "PolicyValidation",
+      "ResultPath": "$.parallel_results"
+    },
+    
+    "PolicyValidation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "ai-compliance-policy-validator",
+        "Payload": {
+          "validation_type": "content",
+          "analysis_result.$": "$.parallel_results[0].analysis_result.Payload.analysis",
+          "policy_context": {
+            "region.$": "$.region",
+            "product_category.$": "$.product_category",
+            "compliance_mode.$": "$.compliance_mode"
+          }
+        }
+      },
+      "ResultPath": "$.policy_result",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "PolicyError"
+        }
+      ],
+      "Next": "CheckPolicyDecision"
+    },
+    
+    "PolicyError": {
+      "Type": "Pass",
+      "Parameters": {
+        "policy_result": {
+          "statusCode": 500,
+          "validation_result": {
+            "decision": "DENY",
+            "reasons": ["SYSTEM_ERROR"],
+            "explanation": "Policy validation failed - defaulting to deny"
+          }
+        }
+      },
+      "ResultPath": "$.policy_result",
+      "Next": "CheckPolicyDecision"
+    },
+    
+    "CheckPolicyDecision": {
+      "Type": "Choice",
+      "Comment": "Check if content passed policy validation",
+      "Choices": [
+        {
+          "Variable": "$.policy_result.Payload.validation_result.decision",
+          "StringEquals": "ALLOW",
+          "Next": "ContentApproved"
+        }
+      ],
+      "Default": "ContentRejected"
+    },
+    
+    "ContentApproved": {
+      "Type": "Parallel",
+      "Comment": "Process approved content - generate summary and log audit",
+      "Branches": [
+        {
+          "StartAt": "GenerateSummary",
+          "States": {
+            "GenerateSummary": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "ai-compliance-review-summarizer",
+                "Payload": {
+                  "product_id.$": "$.product_id",
+                  "reviews": [
+                    {
+                      "review_id.$": "$.review_id",
+                      "content.$": "$.content",
+                      "rating.$": "$.rating",
+                      "analysis_passed": true,
+                      "toxicity_score.$": "$.parallel_results[0].analysis_result.Payload.analysis.toxicity_score",
+                      "bias_score.$": "$.parallel_results[0].analysis_result.Payload.analysis.bias_score",
+                      "hallucination_score.$": "$.parallel_results[0].analysis_result.Payload.analysis.hallucination_score"
+                    }
+                  ],
+                  "policy_context": {
+                    "region.$": "$.region",
+                    "product_category.$": "$.product_category",
+                    "compliance_mode.$": "$.compliance_mode"
+                  }
+                }
+              },
+              "ResultPath": "$.summary_result",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "SummaryError"
+                }
+              ],
+              "End": true
+            },
+            
+            "SummaryError": {
+              "Type": "Pass",
+              "Parameters": {
+                "summary_result": {
+                  "statusCode": 500,
+                  "summary": "Summary generation failed",
+                  "summary_metadata": {
+                    "reviews_processed": 1,
+                    "reviews_included": 0,
+                    "reviews_excluded": 1,
+                    "exclusion_reasons": ["SYSTEM_ERROR"]
+                  }
+                }
+              },
+              "ResultPath": "$.summary_result",
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "LogApprovedAudit",
+          "States": {
+            "LogApprovedAudit": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "ai-compliance-audit-logger",
+                "Payload": {
+                  "audit_event": {
+                    "event_type": "ANALYSIS",
+                    "review_id.$": "$.review_id",
+                    "user_id.$": "$.user_id",
+                    "product_id.$": "$.product_id",
+                    "region.$": "$.region",
+                    "analysis_results.$": "$.parallel_results[0].analysis_result.Payload.analysis",
+                    "policy_decision.$": "$.policy_result.Payload.validation_result",
+                    "processing_duration_ms": 0
+                  }
+                }
+              },
+              "ResultPath": "$.audit_result",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.audit_error",
+                  "Next": "AuditLogError"
+                }
+              ],
+              "End": true
+            },
+            
+            "AuditLogError": {
+              "Type": "Pass",
+              "Comment": "Continue processing even if audit logging fails",
+              "Parameters": {
+                "audit_result": {
+                  "statusCode": 500,
+                  "events_processed": 0,
+                  "events_failed": 1
+                }
+              },
+              "ResultPath": "$.audit_result",
+              "End": true
+            }
+          }
+        }
+      ],
+      "Next": "SuccessResponse"
+    },
+    
+    "ContentRejected": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "ai-compliance-audit-logger",
+        "Payload": {
+          "audit_event": {
+            "event_type": "POLICY_DECISION",
+            "review_id.$": "$.review_id",
+            "user_id.$": "$.user_id",
+            "product_id.$": "$.product_id",
+            "region.$": "$.region",
+            "analysis_results.$": "$.parallel_results[0].analysis_result.Payload.analysis",
+            "policy_decision.$": "$.policy_result.Payload.validation_result",
+            "processing_duration_ms": 0
+          }
+        }
+      },
+      "ResultPath": "$.audit_result",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.audit_error",
+          "Next": "RejectedResponse"
+        }
+      ],
+      "Next": "RejectedResponse"
+    },
+    
+    "SuccessResponse": {
+      "Type": "Pass",
+      "Parameters": {
+        "statusCode": 200,
+        "result": "SUCCESS",
+        "review_id.$": "$[0].review_id",
+        "product_id.$": "$[0].product_id",
+        "policy_decision": "APPROVED",
+        "analysis_summary": {
+          "toxicity_score.$": "$[0].parallel_results[0].analysis_result.Payload.analysis.toxicity_score",
+          "bias_score.$": "$[0].parallel_results[0].analysis_result.Payload.analysis.bias_score",
+          "hallucination_score.$": "$[0].parallel_results[0].analysis_result.Payload.analysis.hallucination_score"
+        },
+        "policy_reasons.$": "$[0].policy_result.Payload.validation_result.reasons",
+        "summary.$": "$[0].summary_result.Payload.summary",
+        "processing_metadata": {
+          "execution_id.$": "$[0].execution_id",
+          "timestamp.$": "$[0].timestamp",
+          "audit_logged": true
+        }
+      },
+      "End": true
+    },
+    
+    "RejectedResponse": {
+      "Type": "Pass",
+      "Parameters": {
+        "statusCode": 200,
+        "result": "REJECTED",
+        "review_id.$": "$.review_id",
+        "product_id.$": "$.product_id",
+        "policy_decision": "DENIED",
+        "analysis_summary": {
+          "toxicity_score.$": "$.parallel_results[0].analysis_result.Payload.analysis.toxicity_score",
+          "bias_score.$": "$.parallel_results[0].analysis_result.Payload.analysis.bias_score",
+          "hallucination_score.$": "$.parallel_results[0].analysis_result.Payload.analysis.hallucination_score"
+        },
+        "policy_reasons.$": "$.policy_result.Payload.validation_result.reasons",
+        "rejection_explanation.$": "$.policy_result.Payload.validation_result.explanation",
+        "processing_metadata": {
+          "execution_id.$": "$.execution_id",
+          "timestamp.$": "$.timestamp",
+          "audit_logged": true
+        }
+      },
+      "End": true
+    }
+  }
+}
